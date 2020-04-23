@@ -51,8 +51,12 @@ class JWTAuthenticationPlugin(BasePlugin):
     token_timeout = 60 * 60 * 12  # 12 hours
     use_keyring = True
     store_tokens = False
+    use_certificate = False
     _secret = None
     _tokens = None
+    _shared_secret = None
+    _private_key = None
+    _public_key = None
 
     # ZMI tab for configuration page
     manage_options = (
@@ -66,7 +70,6 @@ class JWTAuthenticationPlugin(BasePlugin):
         self.title = title
 
     security.declarePrivate("challenge")
-
     # Initiate a challenge to the user to provide credentials.
     def challenge(self, request, response, **kw):
 
@@ -80,7 +83,6 @@ class JWTAuthenticationPlugin(BasePlugin):
         return True
 
     security.declarePrivate("extractCredentials")
-
     # IExtractionPlugin implementation
     # Extracts a JSON web token from the request.
     def extractCredentials(self, request):
@@ -96,10 +98,11 @@ class JWTAuthenticationPlugin(BasePlugin):
         return creds
 
     security.declarePrivate("authenticateCredentials")
-
     # IAuthenticationPlugin implementation
     def authenticateCredentials(self, credentials):
-        # Ignore credentials that are not from our extractor
+        """Ignore credentials that are not from our extractor
+        """
+
         extractor = credentials.get("extractor")
         if extractor != self.getId():
             return None
@@ -124,7 +127,6 @@ class JWTAuthenticationPlugin(BasePlugin):
         return (userid, userid)
 
     security.declareProtected(ManagePortal, "manage_updateConfig")
-
     @postonly
     def manage_updateConfig(self, REQUEST):
         """Update configuration of JWT Authentication Plugin.
@@ -142,8 +144,101 @@ class JWTAuthenticationPlugin(BasePlugin):
             % (self.absolute_url(), "Configuration+updated.")
         )
 
+    security.declareProtected(ManagePortal, "haveSharedSecret")
+    def haveSharedSecret(self):
+        return self._shared_secret is not None
+
+    security.declareProtected(ManagePortal, "manage_removeSharedSecret")
+    @postonly
+    def manage_removeSharedSecret(self, REQUEST):
+        """Clear the shared secret. This invalidates all current sessions and
+        requires users to login again.
+        """
+        self._shared_secret = None
+        response = REQUEST.response
+        response.redirect(
+            '%s/manage_config?manage_tabs_message=%s' %
+            (self.absolute_url(), 'Shared+secret+removed.')
+        )
+
+    security.declareProtected(ManagePortal, "manage_setSharedSecret")
+    @postonly
+    def manage_setSharedSecret(self, REQUEST):
+        """Set the shared secret.
+        """
+        secret = REQUEST.get('shared_secret')
+        response = REQUEST.response
+        if not secret:
+            response.redirect(
+                '%s/manage_config?manage_tabs_message=%s' %
+                (self.absolute_url(), 'Shared+secret+must+not+be+blank.')
+            )
+            return
+        self._shared_secret = secret
+        self._private_key = None
+        self._public_key = None
+        response.redirect(
+            '%s/manage_config?manage_tabs_message=%s' %
+            (self.absolute_url(), 'New+shared+secret+set.')
+        )
+
+    security.declareProtected(ManagePortal, "haveRSAKeys")
+    def haveRSAKeys(self):
+        return self._private_key is not None and self._public_key  is not None
+
+    security.declareProtected(ManagePortal, "manage_removeRSAKeys")
+    @postonly
+    def manage_removeRSAKeys(self, REQUEST):
+        """Clear the shared secret. This invalidates all current sessions and
+        requires users to login again.
+        """
+        self._public_key = None
+        self._private_key = None
+        response = REQUEST.response
+        response.redirect(
+            '%s/manage_config?manage_tabs_message=%s' %
+            (self.absolute_url(), 'Certificates+removed.')
+        )
+
+    security.declareProtected(ManagePortal, "manage_setRSAKeys")
+    @postonly
+    def manage_setRSAKeys(self, REQUEST):
+        """Set the shared secret.
+        """
+        public_key = REQUEST.get('public_key')
+        private_key = REQUEST.get('private_key')
+        response = REQUEST.response
+        if not public_key:
+            response.redirect(
+                '%s/manage_config?manage_tabs_message=%s' %
+                (self.absolute_url(), 'Public+key+must+not+be+blank.')
+            )
+            return
+
+        if not private_key:
+            response.redirect(
+                '%s/manage_config?manage_tabs_message=%s' %
+                (self.absolute_url(), 'Private+key+must+not+be+blank.')
+            )
+            return
+        self._public_key = public_key.encode("utf-8")
+        self._private_key = private_key.encode("utf-8")
+        self._shared_secret = None
+        response.redirect(
+            '%s/manage_config?manage_tabs_message=%s' %
+            (self.absolute_url(), 'New+shared+secret+set.')
+        )
+
     def _decode_token(self, token, verify=True):
-        if self.use_keyring:
+        if self.haveRSAKeys():
+            payload = self._jwt_decode(token, self._public_key, verify=verify)
+            if payload is not None:
+                return payload
+        elif self.haveSharedSecret():
+            payload = self._jwt_decode(token, self._shared_secret, verify=verify)
+            if payload is not None:
+                return payload
+        elif self.use_keyring:
             manager = getUtility(IKeyManager)
             for secret in manager[u"_system"]:
                 if secret is None:
@@ -158,11 +253,18 @@ class JWTAuthenticationPlugin(BasePlugin):
         if isinstance(token, six.text_type):
             token = token.encode("utf-8")
         try:
-            return jwt.decode(token, secret, verify=verify, algorithms=["HS256"])
+            algorithms = ["HS256"]
+            if self.haveRSAKeys():
+                algortihms = ["RS256"]
+            return jwt.decode(token, secret, verify=verify, algorithms=algorithms)
         except jwt.InvalidTokenError:
             return None
 
     def _signing_secret(self):
+        if self.haveRSAKeys():
+            return self._private_key
+        if self.haveSharedSecret():
+            return self._shared_secret
         if self.use_keyring:
             manager = getUtility(IKeyManager)
             return manager.secret() + self._path()
@@ -191,7 +293,10 @@ class JWTAuthenticationPlugin(BasePlugin):
             payload["exp"] = datetime.utcnow() + timedelta(seconds=timeout)
         if data is not None:
             payload.update(data)
-        token = jwt.encode(payload, self._signing_secret(), algorithm="HS256")
+        algorithm = "HS256"
+        if self.haveRSAKeys():
+            algorithm = "RS256"
+        token = jwt.encode(payload, self._signing_secret(), algorithm=algorithm)
         if not six.PY2:
             token = token.decode("utf-8")
         if self.store_tokens:
