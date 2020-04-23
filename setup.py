@@ -90,6 +90,7 @@ setup(
         "plone.schema >= 1.2.0",  # new json field
         "PyJWT",
         "pytz",
+        "cryptography",
     ],
     extras_require={"test": TEST_REQUIRES},
     entry_points="""
