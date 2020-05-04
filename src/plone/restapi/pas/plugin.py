@@ -255,7 +255,7 @@ class JWTAuthenticationPlugin(BasePlugin):
         try:
             algorithms = ["HS256"]
             if self.haveRSAKeys():
-                algortihms = ["RS256"]
+                algorithms = ["RS256"]
             return jwt.decode(token, secret, verify=verify, algorithms=algorithms)
         except jwt.InvalidTokenError:
             return None
