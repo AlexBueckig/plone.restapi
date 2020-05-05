@@ -71,7 +71,6 @@ class Login(Service):
         payload["fullname"] = user.getProperty("fullname")
         if(user.getProperty("email") != None):
             payload["email"] = user.getProperty("email")
-        print(payload)
         return {"token": plugin.create_token(user.getId(), data=payload)}
 
     def _find_userfolder(self, userid):
